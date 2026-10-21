@@ -102,7 +102,7 @@
     return { subjects: [] };
   }
   function saveState(){
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); localStorage.setItem(STORAGE_KEY + '_updatedAt', String(Date.now())); if(window.cloudSave) window.cloudSave(); }
     catch(e){ console.error('Could not save data', e); alert('Could not save — your browser storage may be full or blocked.'); }
   }
   function uid(){ return Math.random().toString(36).slice(2,10); }
@@ -367,7 +367,191 @@
   };
 
   render();
+
+  // Lets the Firebase sync code reload data after it arrives from the cloud.
+  window.answerKeyApp = { reload: function(){ state = loadState(); render(); } };
 })();
+</script>
+
+<!-- ===== Firebase cloud sync ===== -->
+<div id="syncBox" style="position:fixed;right:12px;bottom:12px;z-index:50;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;max-width:92vw;font:12px/1.2 system-ui,sans-serif;color:#555;background:rgba(255,255,255,.95);border:1px solid rgba(0,0,0,.2);border-radius:10px;padding:8px 10px;box-shadow:0 2px 8px rgba(0,0,0,.15);">
+  <span id="syncStatus">Cloud: connecting…</span>
+  <button id="googleBtn" type="button" style="display:none;cursor:pointer;font:inherit;color:#222;background:#f1f1f1;border:1px solid rgba(0,0,0,.25);border-radius:6px;padding:4px 8px;">Sign in with Google</button>
+  <button id="importBtn" type="button" style="cursor:pointer;font:inherit;color:#222;background:#f1f1f1;border:1px solid rgba(0,0,0,.25);border-radius:6px;padding:4px 8px;">Import backup</button>
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider,
+           linkWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAGNw6_KU4SqGcOtLznVVQ_h15KFgv2g7Y",
+    authDomain: "mca-practice-answersheet.firebaseapp.com",
+    projectId: "mca-practice-answersheet",
+    storageBucket: "mca-practice-answersheet.firebasestorage.app",
+    messagingSenderId: "779971320127",
+    appId: "1:779971320127:web:204b7e96e30faaa7295b8a",
+    measurementId: "G-ZW5KGSKZ0C"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const auth = getAuth(app);
+
+  // This app keeps everything in ONE localStorage entry: {subjects:[{id,name,topics:[{id,name,pairs,rawText}]}]}
+  // Unlike scores, subjects/topics can be deleted, so we sync by "newest save wins"
+  // (using a timestamp), not by keeping the best value.
+  const DATA_KEY = "answerKeyApp_v1";
+  const TS_KEY = DATA_KEY + "_updatedAt";
+
+  const statusEl = document.getElementById("syncStatus");
+  const googleBtn = document.getElementById("googleBtn");
+  const importBtn = document.getElementById("importBtn");
+  let currentUser = null;
+  let ready = false; // true once the first cloud check has finished
+
+  function readState() {
+    try {
+      const o = JSON.parse(localStorage.getItem(DATA_KEY) || "null");
+      return o && Array.isArray(o.subjects) ? o : { subjects: [] };
+    } catch (e) { return { subjects: [] }; }
+  }
+  function readTs() { return parseInt(localStorage.getItem(TS_KEY), 10) || 0; }
+  function writeState(state, ts) {
+    localStorage.setItem(DATA_KEY, JSON.stringify(state));
+    localStorage.setItem(TS_KEY, String(ts));
+  }
+
+  // Combine two states without losing anything: subjects and topics are matched by id
+  // (or by name for imported data); the copy with more questions wins a clash.
+  function unionMerge(a, b) {
+    const out = { subjects: [] };
+    const subjects = new Map();
+    function addSubject(sub) {
+      const key = sub.id || sub.name;
+      let target = subjects.get(key);
+      if (!target) {
+        target = { id: sub.id, name: sub.name, topics: [] };
+        subjects.set(key, target);
+        out.subjects.push(target);
+      }
+      (sub.topics || []).forEach(function (t) {
+        const i = target.topics.findIndex(function (x) { return x.id === t.id; });
+        if (i < 0) target.topics.push(t);
+        else if ((t.pairs || []).length > (target.topics[i].pairs || []).length) target.topics[i] = t;
+      });
+    }
+    (a.subjects || []).forEach(addSubject);
+    (b.subjects || []).forEach(addSubject);
+    return out;
+  }
+
+  function refreshButtons() {
+    googleBtn.style.display = currentUser && currentUser.isAnonymous ? "inline-block" : "none";
+    statusEl.textContent = !currentUser ? "Cloud: offline"
+      : currentUser.isAnonymous ? "Cloud: synced (this browser only)"
+      : "Cloud: synced (" + (currentUser.email || "Google") + ")";
+  }
+
+  async function pushToCloud() {
+    if (!currentUser || !ready) return;
+    try {
+      await setDoc(doc(db, "users", currentUser.uid), {
+        data: JSON.stringify(readState()),
+        updatedAtMs: readTs(),
+        updatedAt: serverTimestamp()
+      });
+    } catch (e) { console.error("Cloud save failed", e); statusEl.textContent = "Cloud: save failed"; }
+  }
+
+  // The app calls this after every save (debounced so we don't spam Firestore).
+  let timer = null;
+  window.cloudSave = function () { clearTimeout(timer); timer = setTimeout(pushToCloud, 500); };
+
+  function reloadApp() { window.answerKeyApp && window.answerKeyApp.reload(); }
+
+  async function syncDown(user) {
+    ready = false;
+    try {
+      const snap = await getDoc(doc(db, "users", user.uid));
+      const local = readState(), localTs = readTs();
+      const localHasData = local.subjects.length > 0;
+
+      if (!snap.exists()) {
+        // Nothing in the cloud yet: upload what's on this device.
+        if (localHasData && !localTs) localStorage.setItem(TS_KEY, String(Date.now()));
+      } else {
+        const remote = JSON.parse(snap.data().data || '{"subjects":[]}');
+        const remoteTs = snap.data().updatedAtMs || 0;
+        if (localHasData && !localTs) {
+          // Old local data that was never synced: merge both so nothing is lost.
+          writeState(unionMerge(local, remote), Date.now());
+          reloadApp();
+        } else if (remoteTs > localTs) {
+          writeState(remote, remoteTs);   // cloud copy is newer
+          reloadApp();
+        }
+        // else: this device is newer (or equal), so it gets pushed below
+      }
+      ready = true;
+      await pushToCloud();
+    } catch (e) {
+      console.error("Cloud sync failed", e);
+      statusEl.textContent = "Cloud: sync failed (see console)";
+      return;
+    }
+    refreshButtons();
+  }
+
+  onAuthStateChanged(auth, function (user) {
+    currentUser = user;
+    refreshButtons();
+    if (user) syncDown(user);
+  });
+  signInAnonymously(auth).catch(function (e) {
+    console.error("Anonymous sign-in failed", e);
+    statusEl.textContent = "Cloud: sign-in failed (see console)";
+  });
+
+  // Upgrade the anonymous account to Google so your data follows you across devices.
+  googleBtn.addEventListener("click", async function () {
+    const provider = new GoogleAuthProvider();
+    try {
+      await linkWithPopup(auth.currentUser, provider);
+      currentUser = auth.currentUser;
+      refreshButtons();
+    } catch (e) {
+      if (e.code === "auth/credential-already-in-use") {
+        await signInWithCredential(auth, GoogleAuthProvider.credentialFromError(e));
+      } else {
+        console.error(e);
+        alert("Google sign-in failed: " + (e.code || e.message));
+      }
+    }
+  });
+
+  // Import the JSON copied from the old local file (a full localStorage dump works too).
+  importBtn.addEventListener("click", function () {
+    const text = prompt("Paste the JSON exported from your old localStorage:");
+    if (!text) return;
+    try {
+      let old = JSON.parse(text);
+      // localStorage dumps hold the app data as a string under "answerKeyApp_v1"
+      if (old && old[DATA_KEY] !== undefined) old = old[DATA_KEY];
+      if (typeof old === "string") old = JSON.parse(old);
+      if (!old || !Array.isArray(old.subjects)) { alert("No answer-key data found in that JSON (looking for \"" + DATA_KEY + "\")."); return; }
+      const merged = unionMerge(readState(), old);
+      writeState(merged, Date.now());
+      reloadApp();
+      pushToCloud();
+      const topics = merged.subjects.reduce(function (n, s) { return n + (s.topics || []).length; }, 0);
+      alert("Imported! You now have " + merged.subjects.length + " subject(s) and " + topics + " topic(s).");
+    } catch (e) {
+      alert("That doesn't look like valid JSON. Copy the full console output and try again.");
+    }
+  });
 </script>
 </body>
 </html>
