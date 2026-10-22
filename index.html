@@ -387,7 +387,7 @@
            linkWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 
   const firebaseConfig = {
-    apiKey: "AIzaSyAo_RoRWLamZ6aoRM1gW86EIn4YgiIbwX4",
+    apiKey: "PASTE_YOUR_REAL_API_KEY_HERE",
     authDomain: "mca-practice-answersheet.firebaseapp.com",
     projectId: "mca-practice-answersheet",
     storageBucket: "mca-practice-answersheet.firebasestorage.app",
@@ -448,6 +448,17 @@
     return out;
   }
 
+  // Short, readable reason for a failure (e.g. "permission-denied"), shown next to the status.
+  function errInfo(e) {
+    const code = e && e.code ? String(e.code).replace(/^(firestore|auth)\//, "") : "";
+    return code || (e && e.message) || "unknown error";
+  }
+  function showError(label, e) {
+    console.error(label, e);
+    statusEl.textContent = "Cloud: " + label + " (" + errInfo(e) + ")";
+    statusEl.title = (e && e.message) || "";
+  }
+
   function refreshButtons() {
     googleBtn.style.display = currentUser && currentUser.isAnonymous ? "inline-block" : "none";
     statusEl.textContent = !currentUser ? "Cloud: offline"
@@ -463,7 +474,7 @@
         updatedAtMs: readTs(),
         updatedAt: serverTimestamp()
       });
-    } catch (e) { console.error("Cloud save failed", e); statusEl.textContent = "Cloud: save failed"; }
+    } catch (e) { showError("save failed", e); }
   }
 
   // The app calls this after every save (debounced so we don't spam Firestore).
@@ -498,8 +509,7 @@
       ready = true;
       await pushToCloud();
     } catch (e) {
-      console.error("Cloud sync failed", e);
-      statusEl.textContent = "Cloud: sync failed (see console)";
+      showError("sync failed", e);
       return;
     }
     refreshButtons();
