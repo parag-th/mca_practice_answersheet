@@ -387,7 +387,7 @@
            linkWithPopup, signInWithCredential } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 
   const firebaseConfig = {
-    apiKey: "AIzaSyAGNw6_KU4SqGcOtLznVVQ_h15KFgv2g7Y",
+    apiKey: "AIzaSyAo_RoRWLamZ6aoRM1gW86EIn4YgiIbwX4",
     authDomain: "mca-practice-answersheet.firebaseapp.com",
     projectId: "mca-practice-answersheet",
     storageBucket: "mca-practice-answersheet.firebasestorage.app",
@@ -505,14 +505,20 @@
     refreshButtons();
   }
 
+  // Firebase remembers a signed-in user (Google included) across page reloads and reports it here.
+  // Only create an anonymous user when nobody is signed in. Calling signInAnonymously() on every load
+  // would replace a restored Google session with a brand-new anonymous one.
+  let triedAnonymous = false;
   onAuthStateChanged(auth, function (user) {
     currentUser = user;
     refreshButtons();
-    if (user) syncDown(user);
-  });
-  signInAnonymously(auth).catch(function (e) {
-    console.error("Anonymous sign-in failed", e);
-    statusEl.textContent = "Cloud: sign-in failed (see console)";
+    if (user) { syncDown(user); return; }
+    if (triedAnonymous) return;
+    triedAnonymous = true;
+    signInAnonymously(auth).catch(function (e) {
+      console.error("Anonymous sign-in failed", e);
+      statusEl.textContent = "Cloud: sign-in failed (see console)";
+    });
   });
 
   // Upgrade the anonymous account to Google so your data follows you across devices.
